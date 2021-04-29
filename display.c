@@ -94,10 +94,11 @@ static void draw_rect(SDL_Surface *screen, int x, int y, int width, int height, 
     }
 }
 
-static void draw_text(SDL_Surface *screen, int x, int y, const char *text, Uint8 r, Uint8 g, Uint8 b)
+static void draw_text(SDL_Surface *screen, int x, int y, const char *text, Uint8 r, Uint8 g, Uint8 b, Uint8 bgr, Uint8 bgg, Uint8 bgb)
 {
     int len = strlen(text);
-    Uint32 color = SDL_MapRGB(screen->format, r, g, b);
+    Uint32 fgcolor = SDL_MapRGB(screen->format, r, g, b);
+    Uint32 bgcolor = SDL_MapRGB(screen->format, bgr, bgg, bgb);
 
     for (int i = 0; i < len; i++) {
         unsigned const char *glyph = fontdata + ((unsigned char) text[i]) * 16;
@@ -108,10 +109,101 @@ static void draw_text(SDL_Surface *screen, int x, int y, const char *text, Uint8
             Uint32 *pixmem32 = (Uint32 *) (((uint8_t *) screen->pixels) + (screen->w * (y + j) + x + i * 8) * BPP);
             for (int k = 0; k < 8; k++) {
                 if (row & (1 << (7 - k))) {
-                    pixmem32[k] = color;
+                    pixmem32[k] = fgcolor;
+                } else {
+                    pixmem32[k] = bgcolor;
                 }
             }
         }
+    }
+}
+
+static void execute_command(Context *ctx, term req)
+{
+    term cmd = term_get_tuple_element(req, 0);
+
+    if (cmd == context_make_atom(ctx, "\xA"
+                                      "draw_image")
+        || cmd == context_make_atom(ctx, "\x5"
+                                         "image")) {
+        int x = term_to_int(term_get_tuple_element(req, 1));
+        int y = term_to_int(term_get_tuple_element(req, 2));
+        uint32_t bgcolor = term_to_int(term_get_tuple_element(req, 3));
+        term img = term_get_tuple_element(req, 4);
+
+        term format = term_get_tuple_element(img, 0);
+        if (format != context_make_atom(ctx, "\x8"
+                                             "rgba8888")) {
+            fprintf(stderr, "unsupported image format: ");
+            term_display(stderr, format, ctx);
+            fprintf(stderr, "\n");
+            return;
+        }
+        int width = term_to_int(term_get_tuple_element(img, 1));
+        int height = term_to_int(term_get_tuple_element(img, 2));
+        const char *data = term_binary_data(term_get_tuple_element(img, 3));
+
+        draw_image(screen, x, y, width, height, data, (bgcolor >> 16),
+            (bgcolor >> 8) & 0xFF, bgcolor & 0xFF);
+
+    } else if (cmd == context_make_atom(ctx, "\x9"
+                                             "draw_rect")
+        || cmd == context_make_atom(ctx, "\x4"
+                                         "rect")) {
+        int x = term_to_int(term_get_tuple_element(req, 1));
+        int y = term_to_int(term_get_tuple_element(req, 2));
+        int width = term_to_int(term_get_tuple_element(req, 3));
+        int height = term_to_int(term_get_tuple_element(req, 4));
+        int color = term_to_int(term_get_tuple_element(req, 5));
+
+        draw_rect(screen, x, y, width, height,
+            (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+
+    } else if (cmd == context_make_atom(ctx, "\x9"
+                                             "draw_text")
+        || cmd == context_make_atom(ctx, "\x4"
+                                         "text")) {
+        int x = term_to_int(term_get_tuple_element(req, 1));
+        int y = term_to_int(term_get_tuple_element(req, 2));
+        term font = term_get_tuple_element(req, 3);
+        uint32_t fgcolor = term_to_int(term_get_tuple_element(req, 4));
+        uint32_t bgcolor = term_to_int(term_get_tuple_element(req, 5));
+        term text_term = term_get_tuple_element(req, 6);
+
+        if (font != context_make_atom(ctx, "\xB"
+                                           "default16px")) {
+            fprintf(stderr, "unsupported font: ");
+            term_display(stderr, font, ctx);
+            fprintf(stderr, "\n");
+            return;
+        }
+
+        int ok;
+        char *text = interop_term_to_string(text_term, &ok);
+
+        draw_text(screen, x, y, text, (fgcolor >> 16) & 0xFF, (fgcolor >> 8) & 0xFF, fgcolor & 0xFF,
+            (bgcolor >> 16) & 0xFF, (bgcolor >> 8) & 0xFF, bgcolor & 0xFF);
+
+        free(text);
+
+    } else if (cmd == context_make_atom(ctx, "\x6"
+                                             "listen")) {
+        keyboard_pid = term_get_tuple_element(req, 1);
+
+    } else {
+        fprintf(stderr, "display: ");
+        term_display(stderr, req, ctx);
+        fprintf(stderr, "\n");
+    }
+}
+
+static void execute_commands(Context *ctx, term display_list)
+{
+    term t = display_list;
+
+    while (term_is_nonempty_list(t)) {
+        execute_command(ctx, term_get_list_head(t));
+        t = term_get_list_tail(t);
     }
 }
 
@@ -129,68 +221,27 @@ static void process_message(Context *ctx)
     int local_process_id = term_to_local_process_id(pid);
     Context *target = globalcontext_get_process(ctx->global, local_process_id);
 
-    struct DisplayOpts *disp_opts = ctx->platform_data;
-
     if (SDL_MUSTLOCK(screen)) {
         if (SDL_LockSurface(screen) < 0) {
             return;
         }
     }
 
-    if (cmd == context_make_atom(ctx, "\xC"
-                                      "clear_screen")) {
+    if (cmd == context_make_atom(ctx, "\x6"
+                                      "update")) {
+        term display_list = term_get_tuple_element(req, 1);
+        execute_commands(ctx, display_list);
+
+    } else if (cmd == context_make_atom(ctx, "\xC"
+                                             "clear_screen")) {
         int color = term_to_int(term_get_tuple_element(req, 1));
 
+        struct DisplayOpts *disp_opts = ctx->platform_data;
         draw_rect(screen, 0, 0, disp_opts->width, disp_opts->height,
             (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 
-    } else if (cmd == context_make_atom(ctx, "\xA"
-                                             "draw_image")) {
-        int x = term_to_int(term_get_tuple_element(req, 1));
-        int y = term_to_int(term_get_tuple_element(req, 2));
-        term img = term_get_tuple_element(req, 3);
-        int color = term_to_int(term_get_tuple_element(req, 4));
-
-        int width = term_to_int(term_get_tuple_element(img, 0));
-        int height = term_to_int(term_get_tuple_element(img, 1));
-        const char *data = term_binary_data(term_get_tuple_element(img, 2));
-
-        draw_image(screen, x, y, width, height, data, (color >> 16),
-            (color >> 8) & 0xFF, color & 0xFF);
-
-    } else if (cmd == context_make_atom(ctx, "\x9"
-                                             "draw_rect")) {
-        int x = term_to_int(term_get_tuple_element(req, 1));
-        int y = term_to_int(term_get_tuple_element(req, 2));
-        int width = term_to_int(term_get_tuple_element(req, 3));
-        int height = term_to_int(term_get_tuple_element(req, 4));
-        int color = term_to_int(term_get_tuple_element(req, 5));
-
-        draw_rect(screen, x, y, width, height,
-            (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-
-    } else if (cmd == context_make_atom(ctx, "\x9"
-                                             "draw_text")) {
-        int x = term_to_int(term_get_tuple_element(req, 1));
-        int y = term_to_int(term_get_tuple_element(req, 2));
-        term text_term = term_get_tuple_element(req, 3);
-        int color = term_to_int(term_get_tuple_element(req, 4));
-
-        int ok;
-        char *text = interop_term_to_string(text_term, &ok);
-
-        draw_text(screen, x, y, text, (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-
-        free(text);
-
-    } else if (cmd == context_make_atom(ctx, "\x6"
-                                             "listen")) {
-        keyboard_pid = term_get_tuple_element(req, 1);
-
     } else {
-        fprintf(stderr, "display: ");
-        term_display(stderr, req, ctx);
-        fprintf(stderr, "\n");
+        execute_command(ctx, req);
     }
 
     if (SDL_MUSTLOCK(screen)) {
