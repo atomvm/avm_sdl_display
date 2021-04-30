@@ -122,10 +122,8 @@ static void execute_command(Context *ctx, term req)
 {
     term cmd = term_get_tuple_element(req, 0);
 
-    if (cmd == context_make_atom(ctx, "\xA"
-                                      "draw_image")
-        || cmd == context_make_atom(ctx, "\x5"
-                                         "image")) {
+    if (cmd == context_make_atom(ctx, "\x5"
+                                      "image")) {
         int x = term_to_int(term_get_tuple_element(req, 1));
         int y = term_to_int(term_get_tuple_element(req, 2));
         uint32_t bgcolor = term_to_int(term_get_tuple_element(req, 3));
@@ -146,10 +144,8 @@ static void execute_command(Context *ctx, term req)
         draw_image(screen, x, y, width, height, data, (bgcolor >> 16),
             (bgcolor >> 8) & 0xFF, bgcolor & 0xFF);
 
-    } else if (cmd == context_make_atom(ctx, "\x9"
-                                             "draw_rect")
-        || cmd == context_make_atom(ctx, "\x4"
-                                         "rect")) {
+    } else if (cmd == context_make_atom(ctx, "\x4"
+                                             "rect")) {
         int x = term_to_int(term_get_tuple_element(req, 1));
         int y = term_to_int(term_get_tuple_element(req, 2));
         int width = term_to_int(term_get_tuple_element(req, 3));
@@ -159,10 +155,8 @@ static void execute_command(Context *ctx, term req)
         draw_rect(screen, x, y, width, height,
             (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
 
-    } else if (cmd == context_make_atom(ctx, "\x9"
-                                             "draw_text")
-        || cmd == context_make_atom(ctx, "\x4"
-                                         "text")) {
+    } else if (cmd == context_make_atom(ctx, "\x4"
+                                             "text")) {
         int x = term_to_int(term_get_tuple_element(req, 1));
         int y = term_to_int(term_get_tuple_element(req, 2));
         term font = term_get_tuple_element(req, 3);
@@ -186,12 +180,8 @@ static void execute_command(Context *ctx, term req)
 
         free(text);
 
-    } else if (cmd == context_make_atom(ctx, "\x6"
-                                             "listen")) {
-        keyboard_pid = term_get_tuple_element(req, 1);
-
     } else {
-        fprintf(stderr, "display: ");
+        fprintf(stderr, "unexpected display list command: ");
         term_display(stderr, req, ctx);
         fprintf(stderr, "\n");
     }
@@ -199,6 +189,9 @@ static void execute_command(Context *ctx, term req)
 
 static void execute_commands(Context *ctx, term display_list)
 {
+    struct DisplayOpts *disp_opts = ctx->platform_data;
+    draw_rect(screen, 0, 0, disp_opts->width, disp_opts->height, 0xFF, 0xFF, 0xFF);
+
     term t = display_list;
 
     while (term_is_nonempty_list(t)) {
@@ -232,16 +225,14 @@ static void process_message(Context *ctx)
         term display_list = term_get_tuple_element(req, 1);
         execute_commands(ctx, display_list);
 
-    } else if (cmd == context_make_atom(ctx, "\xC"
-                                             "clear_screen")) {
-        int color = term_to_int(term_get_tuple_element(req, 1));
-
-        struct DisplayOpts *disp_opts = ctx->platform_data;
-        draw_rect(screen, 0, 0, disp_opts->width, disp_opts->height,
-            (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
+    } else if (cmd == context_make_atom(ctx, "\xF"
+                                             "subscribe_input")) {
+        keyboard_pid = term_get_tuple_element(req, 1);
 
     } else {
-        execute_command(ctx, req);
+        fprintf(stderr, "unexpected command: ");
+        term_display(stderr, req, ctx);
+        fprintf(stderr, "\n");
     }
 
     if (SDL_MUSTLOCK(screen)) {
