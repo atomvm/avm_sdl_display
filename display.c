@@ -47,7 +47,7 @@ struct GenericUnixPlatformData
 
 struct KeyboardEvent
 {
-    uint8_t key;
+    uint16_t key;
     bool key_down;
 };
 
@@ -227,7 +227,7 @@ static void process_message(Context *ctx)
 
     } else if (cmd == context_make_atom(ctx, "\xF"
                                              "subscribe_input")) {
-        keyboard_pid = term_get_tuple_element(req, 1);
+        keyboard_pid = pid;
 
     } else {
         fprintf(stderr, "unexpected command: ");
@@ -266,7 +266,9 @@ static void send_message(term pid, term message, GlobalContext *global)
 {
     int local_process_id = term_to_local_process_id(pid);
     Context *target = globalcontext_get_process(global, local_process_id);
-    mailbox_send(target, message);
+    if (target) {
+        mailbox_send(target, message);
+    }
 }
 
 static void keyboard_callback(EventListener *listener)
@@ -282,16 +284,27 @@ static void keyboard_callback(EventListener *listener)
 
         avm_int_t millis = (ts.tv_sec - ts0.tv_sec) * 1000 + (ts.tv_nsec - ts0.tv_nsec) / 1000000;
 
-        if (UNLIKELY(memory_ensure_free(ctx, 5) != MEMORY_GC_OK)) {
+        if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3) + TUPLE_SIZE(4)) != MEMORY_GC_OK)) {
             abort();
         }
 
+        term up_down = keyb.key_down ? context_make_atom(ctx, "\x4"
+                                                              "down")
+                                     : context_make_atom(ctx, "\x2"
+                                                              "up");
+
+        term event_data_tuple = term_alloc_tuple(3, ctx);
+        term_put_tuple_element(event_data_tuple, 0, context_make_atom(ctx, "\x8"
+                                                                           "keyboard"));
+        term_put_tuple_element(event_data_tuple, 1, up_down);
+        term_put_tuple_element(event_data_tuple, 2, term_from_int(keyb.key));
+
         term event_tuple = term_alloc_tuple(4, ctx);
-        term_put_tuple_element(event_tuple, 0, context_make_atom(ctx, "\xE"
-                                                                      "keyboard_event"));
-        term_put_tuple_element(event_tuple, 1, term_from_int(keyb.key));
-        term_put_tuple_element(event_tuple, 2, keyb.key_down ? TRUE_ATOM : FALSE_ATOM);
-        term_put_tuple_element(event_tuple, 3, term_from_int(millis));
+        term_put_tuple_element(event_tuple, 0, context_make_atom(ctx, "\xB"
+                                                                      "input_event"));
+        term_put_tuple_element(event_tuple, 1, term_from_local_process_id(ctx->process_id));
+        term_put_tuple_element(event_tuple, 2, term_from_int(millis));
+        term_put_tuple_element(event_tuple, 3, event_data_tuple);
 
         send_message(keyboard_pid, event_tuple, ctx->global);
     }
@@ -361,6 +374,8 @@ void *display_loop(void *args)
         abort();
     }
 
+    SDL_EnableUNICODE(1);
+
     if (!(screen = SDL_SetVideoMode(disp_opts->width, disp_opts->height, DEPTH, SDL_HWSURFACE))) {
         SDL_Quit();
         abort();
@@ -393,8 +408,13 @@ void *display_loop(void *args)
             }
 
             case SDL_KEYDOWN: {
+                if (event.key.keysym.unicode == 0) {
+                    continue;
+                } else if (event.key.keysym.unicode == '\r') {
+                    event.key.keysym.unicode = '\n';
+                }
                 struct KeyboardEvent keyb_event;
-                keyb_event.key = event.key.keysym.sym;
+                keyb_event.key = event.key.keysym.unicode;
                 keyb_event.key_down = true;
                 write(keyboard_event_fds[1], &keyb_event, sizeof(keyb_event));
                 break;
