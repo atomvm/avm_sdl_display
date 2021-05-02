@@ -174,6 +174,10 @@ static void execute_command(Context *ctx, term req)
 
         int ok;
         char *text = interop_term_to_string(text_term, &ok);
+        if (!ok) {
+            fprintf(stderr, "invalid text.\n");
+            return;
+        }
 
         draw_text(screen, x, y, text, (fgcolor >> 16) & 0xFF, (fgcolor >> 8) & 0xFF, fgcolor & 0xFF,
             (bgcolor >> 16) & 0xFF, (bgcolor >> 8) & 0xFF, bgcolor & 0xFF);
