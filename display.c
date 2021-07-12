@@ -327,7 +327,7 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
         item->x = term_to_int(term_get_tuple_element(req, 1));
         item->y = term_to_int(term_get_tuple_element(req, 2));
 
-        item->data.text_data.fgcolor = term_to_int(term_get_tuple_element(req, 4));
+        item->data.text_data.fgcolor = term_to_int(term_get_tuple_element(req, 4)) << 8 | 0xFF;
         term bgcolor = term_get_tuple_element(req, 5);
         if (bgcolor == context_make_atom(ctx, "\xB"
                                               "transparent")) {
