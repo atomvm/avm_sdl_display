@@ -198,27 +198,24 @@ static void dumb_diff(BaseDisplayItem *orig, int orig_len, BaseDisplayItem *new,
         return;
     }
 
-    BaseDisplayItem *b = orig;
-    BaseDisplayItem *a = new;
-
     int j = 0;
 
     for (int i = 0; i < new_len; i++) {
-        if (cmp_display_item(&a[i], &b[j])) {
+        if (cmp_display_item(&new[i], &orig[j])) {
             j++;
         } else {
             bool found = false;
             for (int k = j + 1; k < orig_len; k++) {
-                //fprintf(stderr, "%c, %c\n", a[i], b[k]);
-                if (cmp_display_item(&a[i], &b[k])) {
+                //fprintf(stderr, "%c, %c\n", new[i], orig[k]);
+                if (cmp_display_item(&new[i], &orig[k])) {
                     fprintf(stderr, "- %i\n", k - j);
 
                     for (int l = k - j; l < k; l++) {
                         struct Rectangle irect = {
-                            .x = b[l].x,
-                            .y = b[l].y,
-                            .width = b[l].width,
-                            .height = b[l].height,
+                            .x = orig[l].x,
+                            .y = orig[l].y,
+                            .width = orig[l].width,
+                            .height = orig[l].height,
                             .valid = true
                         };
                         update_damaged_area(damaged, &irect);
@@ -231,10 +228,10 @@ static void dumb_diff(BaseDisplayItem *orig, int orig_len, BaseDisplayItem *new,
             }
             if (!found) {
                 struct Rectangle irect = {
-                    .x = a[i].x,
-                    .y = a[i].y,
-                    .width = a[i].width,
-                    .height = a[i].height,
+                    .x = new[i].x,
+                    .y = new[i].y,
+                    .width = new[i].width,
+                    .height = new[i].height,
                     .valid = true
                 };
                 update_damaged_area(damaged, &irect);
