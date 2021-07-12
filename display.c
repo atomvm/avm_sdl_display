@@ -52,6 +52,15 @@ struct KeyboardEvent
     bool key_down;
 };
 
+struct Rectangle
+{
+    int x;
+    int y;
+    int width;
+    int height;
+    bool valid;
+};
+
 enum primitive
 {
     Invalid = 0,
@@ -145,15 +154,6 @@ static bool cmp_display_item(BaseDisplayItem *a, BaseDisplayItem *b)
         }
     }
 }
-
-struct Rectangle
-{
-    int x;
-    int y;
-    int width;
-    int height;
-    bool valid;
-};
 
 static void update_damaged_area(struct Rectangle *area, const struct Rectangle *damage)
 {
