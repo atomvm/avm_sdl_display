@@ -531,8 +531,9 @@ static void keyboard_callback(EventListener *listener)
     }
 }
 
-void display_port_driver_init(Context *ctx, term opts)
+Context *display_create_port(GlobalContext *global, term opts)
 {
+    Context *ctx = context_new(global);
     ctx->native_handler = consume_display_mailbox;
 
     term width_atom = context_make_atom(ctx, "\x5"
@@ -581,6 +582,8 @@ void display_port_driver_init(Context *ctx, term opts)
     linkedlist_append(&platform->listeners, &listener->listeners_list_head);
 
     clock_gettime(CLOCK_MONOTONIC, &ts0);
+
+    return ctx;
 }
 
 void *display_loop(void *args)
