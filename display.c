@@ -429,18 +429,23 @@ static void process_message(Context *ctx)
     if (!term_is_tuple(msg) ||
             term_get_tuple_arity(msg) != 3 ||
             term_get_tuple_element(msg, 0) != context_make_atom(ctx, "\x5" "$call")) {
-        fprintf(stderr, "Got invalid message: ");
-        term_display(stderr, msg, ctx);
-        fprintf(stderr, "\n");
-        fprintf(stderr, "Expected gen_server call.\n");
-
-        free(message);
-        return;
+        goto invalid_message;
     }
+
     term from = term_get_tuple_element(msg, 1);
+    if (!term_is_tuple(from) || term_get_tuple_arity(from) != 2) {
+        goto invalid_message;
+    }
+
     term req = term_get_tuple_element(msg, 2);
+    if (!term_is_tuple(req) || term_get_tuple_arity(req) < 1) {
+        goto invalid_message;
+    }
 
     term pid = term_get_tuple_element(from, 0);
+    if (!term_is_pid(pid)) {
+        goto invalid_message;
+    }
 
     term cmd = term_get_tuple_element(req, 0);
 
@@ -485,6 +490,16 @@ static void process_message(Context *ctx)
     mailbox_send(target, return_tuple);
 
     free(message);
+    return;
+
+invalid_message:
+    fprintf(stderr, "Got invalid message: ");
+    term_display(stderr, msg, ctx);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "Expected gen_server call.\n");
+
+    free(message);
+    return;
 }
 
 static void consume_display_mailbox(Context *ctx)
