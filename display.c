@@ -426,9 +426,21 @@ static void process_message(Context *ctx)
     Message *message = mailbox_dequeue(ctx);
     term msg = message->message;
 
-    term pid = term_get_tuple_element(msg, 1);
-    term ref = term_get_tuple_element(msg, 2);
-    term req = term_get_tuple_element(msg, 3);
+    if (!term_is_tuple(msg) ||
+            term_get_tuple_arity(msg) != 3 ||
+            term_get_tuple_element(msg, 0) != context_make_atom(ctx, "\x5" "$call")) {
+        fprintf(stderr, "Got invalid message: ");
+        term_display(stderr, msg, ctx);
+        fprintf(stderr, "\n");
+        fprintf(stderr, "Expected gen_server call.\n");
+
+        free(message);
+        return;
+    }
+    term from = term_get_tuple_element(msg, 1);
+    term req = term_get_tuple_element(msg, 2);
+
+    term pid = term_get_tuple_element(from, 0);
 
     term cmd = term_get_tuple_element(req, 0);
 
@@ -462,14 +474,13 @@ static void process_message(Context *ctx)
 
     SDL_Flip(screen);
 
-    if (UNLIKELY(memory_ensure_free(ctx, REF_SIZE + TUPLE_SIZE(2)) != MEMORY_GC_OK)) {
+    if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
         abort();
     }
-
-    term return_tuple = term_alloc_tuple(2, ctx);
-
-    term_put_tuple_element(return_tuple, 0, ref);
-    term_put_tuple_element(return_tuple, 1, OK_ATOM);
+    term return_tuple = term_alloc_tuple(3, ctx);
+    term_put_tuple_element(return_tuple, 0, context_make_atom(ctx, "\x6" "$reply"));
+    term_put_tuple_element(return_tuple, 1, from);
+    term_put_tuple_element(return_tuple, 2, OK_ATOM);
 
     mailbox_send(target, return_tuple);
 
