@@ -92,14 +92,24 @@ static term keyboard_pid;
 static struct timespec ts0;
 static int keyboard_event_fds[2];
 
-static SDL_Surface *screen;
+struct Screen
+{
+    int w;
+    int h;
+    int scale;
+    void *pixels;
+    SDL_PixelFormat *format;
+};
+
+static struct Screen *screen;
+static SDL_Surface *surface;
 static pthread_mutex_t ready_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 
 static void consume_display_mailbox(Context *ctx);
 static void *display_loop();
 
-static inline Uint32 uint32_color_to_surface(SDL_Surface *screen, uint32_t color)
+static inline Uint32 uint32_color_to_surface(struct Screen *screen, uint32_t color)
 {
     return SDL_MapRGB(screen->format, (color >> 24) & 0xFF, (color >> 16) & 0xFF, (color >> 8) & 0xFF);
 }
@@ -452,8 +462,8 @@ static void process_message(Context *ctx)
     int local_process_id = term_to_local_process_id(pid);
     Context *target = globalcontext_get_process(ctx->global, local_process_id);
 
-    if (SDL_MUSTLOCK(screen)) {
-        if (SDL_LockSurface(screen) < 0) {
+    if (SDL_MUSTLOCK(surface)) {
+        if (SDL_LockSurface(surface) < 0) {
             return;
         }
     }
@@ -462,6 +472,16 @@ static void process_message(Context *ctx)
                                       "update")) {
         term display_list = term_get_tuple_element(req, 1);
         do_update(ctx, display_list);
+
+        // Copy and scale up
+        int scale = screen->scale;
+        for (int ypos = 0; ypos < surface->h; ypos++) {
+            for (int xpos = 0; xpos < surface->w; xpos++) {
+                Uint32 *srcpix = (Uint32 *) (((uint8_t *) screen->pixels) + screen->w * (ypos / scale) * BPP + (xpos / scale) * BPP);
+                Uint32 *destpix = (Uint32 *) (((uint8_t *) surface->pixels) + surface->w * ypos * BPP + xpos * BPP);
+                *destpix = *srcpix;
+            }
+        }
 
     } else if (cmd == context_make_atom(ctx, "\xF"
                                              "subscribe_input")) {
@@ -473,11 +493,11 @@ static void process_message(Context *ctx)
         fprintf(stderr, "\n");
     }
 
-    if (SDL_MUSTLOCK(screen)) {
-        SDL_UnlockSurface(screen);
+    if (SDL_MUSTLOCK(surface)) {
+        SDL_UnlockSurface(surface);
     }
 
-    SDL_Flip(screen);
+    SDL_Flip(surface);
 
     if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
         abort();
@@ -612,9 +632,25 @@ Context *display_create_port(GlobalContext *global, term opts)
     return ctx;
 }
 
+static int get_scale()
+{
+    int scale = 1;
+    const char *scale_str = getenv("AVM_SDL_DISPLAY_SCALE");
+    if (scale_str && (strlen(scale_str) > 0)) {
+        char *first_invalid;
+        scale = strtol(scale_str, &first_invalid, 10);
+        if (*first_invalid != '\0') {
+            scale = 1;
+        }
+    }
+
+    return scale;
+}
+
 void *display_loop(void *args)
 {
     struct DisplayOpts *disp_opts = (struct DisplayOpts *) args;
+    int scale = get_scale();
 
     pthread_mutex_lock(&ready_mutex);
 
@@ -626,24 +662,32 @@ void *display_loop(void *args)
 
     SDL_EnableUNICODE(1);
 
-    if (!(screen = SDL_SetVideoMode(disp_opts->width, disp_opts->height, DEPTH, SDL_HWSURFACE))) {
+    if (!(surface = SDL_SetVideoMode(disp_opts->width * scale, disp_opts->height * scale, DEPTH, SDL_HWSURFACE))) {
         SDL_Quit();
         abort();
     }
 
-    if (SDL_MUSTLOCK(screen)) {
-        if (SDL_LockSurface(screen) < 0) {
+    if (SDL_MUSTLOCK(surface)) {
+        if (SDL_LockSurface(surface) < 0) {
             return NULL;
         }
     }
 
-    memset(screen->pixels, 0x80, disp_opts->width * disp_opts->height * BPP);
+    screen = malloc(sizeof(struct Screen));
+    screen->w = disp_opts->width;
+    screen->h = disp_opts->height;
+    screen->scale = scale;
+    screen->pixels = malloc(disp_opts->width * disp_opts->height * BPP);
+    screen->format = surface->format;
 
-    if (SDL_MUSTLOCK(screen)) {
-        SDL_UnlockSurface(screen);
+    memset(screen->pixels, 0x80, disp_opts->width * disp_opts->height * BPP);
+    memset(surface->pixels, 0x80, disp_opts->width * scale * disp_opts->height * scale * BPP);
+
+    if (SDL_MUSTLOCK(surface)) {
+        SDL_UnlockSurface(surface);
     }
 
-    SDL_Flip(screen);
+    SDL_Flip(surface);
 
     pthread_cond_signal(&ready);
     pthread_mutex_unlock(&ready_mutex);
