@@ -13,7 +13,7 @@ endif()
 
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 
-add_library(avm_display_port_driver SHARED display.c)
+add_library(avm_display_port_driver SHARED display.c uFontLib/ufontlib.c)
 target_link_libraries(avm_display_port_driver ${SDL_LIBRARY})
 set_property(TARGET avm_display_port_driver PROPERTY C_STANDARD 99)
 set_property(TARGET avm_display_port_driver PROPERTY PREFIX "")
