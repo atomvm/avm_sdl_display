@@ -10,6 +10,8 @@
 #include <AtomVM/term.h>
 #include <AtomVM/utils.h>
 
+#include "ufontlib.h"
+
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
 #define BPP 4
@@ -106,12 +108,36 @@ static SDL_Surface *surface;
 static pthread_mutex_t ready_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 
+UFontManager *ufont_manager;
+
 static void consume_display_mailbox(Context *ctx);
 static void *display_loop();
 
 static inline Uint32 uint32_color_to_surface(struct Screen *screen, uint32_t color)
 {
     return SDL_MapRGB(screen->format, (color >> 24) & 0xFF, (color >> 16) & 0xFF, (color >> 8) & 0xFF);
+}
+
+struct Surface
+{
+    int width;
+    int height;
+    void *buffer;
+};
+
+void epd_draw_pixel(int xpos, int ypos, uint8_t color, void *buffer)
+{
+    struct Surface *surface = buffer;
+
+    if (xpos < 0 || ypos < 0 || xpos >= surface->width || ypos >= surface->height) {
+        return;
+    }
+
+    Uint32 *pixmem32b = (Uint32 *) (((uint8_t *) surface->buffer) + surface->width * ypos * BPP + xpos * BPP);
+
+    //TODO: handle other colors than black
+    UNUSED(color);
+    *pixmem32b = 0xFF000000;
 }
 
 static int draw_image_x(int xpos, int ypos, int max_line_len, BaseDisplayItem *item)
@@ -333,39 +359,72 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
 
     } else if (cmd == context_make_atom(ctx, "\x4"
                                              "text")) {
-        item->primitive = Text;
         item->x = term_to_int(term_get_tuple_element(req, 1));
         item->y = term_to_int(term_get_tuple_element(req, 2));
-
-        item->data.text_data.fgcolor = term_to_int(term_get_tuple_element(req, 4)) << 8 | 0xFF;
+        Uint32 fgcolor = term_to_int(term_get_tuple_element(req, 4)) << 8 | 0xFF;
+        Uint32 brcolor;
         term bgcolor = term_get_tuple_element(req, 5);
         if (bgcolor == context_make_atom(ctx, "\xB"
                                               "transparent")) {
-            item->brcolor = 0;
+            brcolor = 0;
         } else {
-            item->brcolor = ((uint32_t) term_to_int(bgcolor)) << 8 | 0xFF;
+            brcolor = ((uint32_t) term_to_int(bgcolor)) << 8 | 0xFF;
         }
-
-        term font = term_get_tuple_element(req, 3);
-        if (font != context_make_atom(ctx, "\xB"
-                                           "default16px")) {
-            fprintf(stderr, "unsupported font: ");
-            term_display(stderr, font, ctx);
-            fprintf(stderr, "\n");
-            return;
-        }
-
         term text_term = term_get_tuple_element(req, 6);
         int ok;
-        item->data.text_data.text = interop_term_to_string(text_term, &ok);
+        char *text = interop_term_to_string(text_term, &ok);
         if (!ok) {
             fprintf(stderr, "invalid text.\n");
             return;
         }
 
-        item->height = 16;
-        item->width = strlen(item->data.text_data.text) * 8;
+        term font = term_get_tuple_element(req, 3);
 
+        if (font == context_make_atom(ctx, "\xB" "default16px")) {
+            item->primitive = Text;
+            item->height = 16;
+            item->width = strlen(item->data.text_data.text) * 8;
+            item->brcolor = brcolor;
+            item->data.text_data.fgcolor = fgcolor;
+            item->data.text_data.text = text;
+
+        } else {
+            AtomString handle_atom = globalcontext_atomstring_from_term(ctx->global, font);
+            char handle[255];
+            atom_string_to_c(handle_atom, handle, sizeof(handle));
+            EpdFont *loaded_font = ufont_manager_find_by_handle(ufont_manager, handle);
+
+            if (!loaded_font) {
+                fprintf(stderr, "unsupported font: ");
+                term_display(stderr, font, ctx);
+                fprintf(stderr, "\n");
+                return;
+            }
+
+            EpdFontProperties props = epd_font_properties_default();
+            EpdRect rect = epd_get_string_rect(loaded_font, text, 0, 0, 0, &props);
+
+            struct Surface surface;
+            surface.width = rect.width;
+            surface.height = rect.height;
+            surface.buffer = malloc(rect.width * rect.height * BPP);
+            memset(surface.buffer, 0, rect.width * rect.height * BPP);
+            int text_x = 0;
+            int text_y = loaded_font->ascender;
+            enum EpdDrawError res = epd_write_default(loaded_font, text, &text_x, &text_y, &surface);
+            free(text);
+            if (res != EPD_DRAW_SUCCESS) {
+                fprintf(stderr, "Failed to draw text. Error code: %i\n", res);
+                return;
+            }
+
+            item->primitive = Image;
+            item->width = surface.width;
+            item->height = surface.height;
+            item->brcolor = 0;
+            //FIXME: surface buffer leak
+            item->data.image_data.pix = surface.buffer;
+        }
     } else {
         fprintf(stderr, "unexpected display list command: ");
         term_display(stderr, req, ctx);
@@ -486,6 +545,15 @@ static void process_message(Context *ctx)
     } else if (cmd == context_make_atom(ctx, "\xF"
                                              "subscribe_input")) {
         keyboard_pid = pid;
+
+    } else if (cmd == context_make_atom(ctx, "\xD" "register_font")) {
+        term font_bin = term_get_tuple_element(req, 2);
+        EpdFont *loaded_font = ufont_parse(term_binary_data(font_bin), term_binary_size(font_bin));
+
+        AtomString handle_atom = globalcontext_atomstring_from_term(ctx->global, term_get_tuple_element(req, 1));
+        char handle[255];
+        atom_string_to_c(handle_atom, handle, sizeof(handle));
+        ufont_manager_register(ufont_manager, handle, loaded_font);
 
     } else {
         fprintf(stderr, "unexpected command: ");
@@ -682,6 +750,8 @@ void *display_loop(void *args)
 
     memset(screen->pixels, 0x80, disp_opts->width * disp_opts->height * BPP);
     memset(surface->pixels, 0x80, disp_opts->width * scale * disp_opts->height * scale * BPP);
+
+    ufont_manager = ufont_manager_new();
 
     if (SDL_MUSTLOCK(surface)) {
         SDL_UnlockSurface(surface);
