@@ -54,6 +54,15 @@ struct KeyboardEvent
     bool key_down;
 };
 
+struct Rectangle
+{
+    int x;
+    int y;
+    int width;
+    int height;
+    bool valid;
+};
+
 enum primitive
 {
     Invalid = 0,
@@ -112,6 +121,123 @@ UFontManager *ufont_manager;
 
 static void consume_display_mailbox(Context *ctx);
 static void *display_loop();
+
+Message *prev_message = NULL;
+BaseDisplayItem *prev_items = NULL;
+int prev_items_len = 0;
+
+static inline int int_min(int a, int b)
+{
+    return (a > b) ? b : a;
+}
+
+static inline int int_max(int a, int b)
+{
+    return (a > b) ? a : b;
+}
+
+static bool cmp_display_item(BaseDisplayItem *a, BaseDisplayItem *b)
+{
+    if (a->primitive != b->primitive || a->x != b->x || a->y != b->y ||
+            a->width != b->width || a->height != b->height || a->brcolor != b->brcolor) {
+        return false;
+    }
+
+    switch (a->primitive) {
+        case Image:
+            return a->data.image_data.pix == b->data.image_data.pix;
+
+        case Rect:
+            return true;
+
+        case Text:
+            return (a->data.text_data.fgcolor == b->data.text_data.fgcolor) &&
+                !strcmp(a->data.text_data.text, b->data.text_data.text);
+
+        default: {
+            return true;
+        }
+    }
+}
+
+static void update_damaged_area(struct Rectangle *area, const struct Rectangle *damage)
+{
+    if (area->valid) {
+        area->x = int_min(area->x, damage->x);
+        area->y = int_min(area->y, damage->y);
+        area->width = int_max(area->x + area->width, damage->x + damage->width) - area->x;
+        area->height = int_max(area->y + area->height, damage->y + damage->height) - area->y;
+    } else {
+        area->x = damage->x;
+        area->y = damage->y;
+        area->width = damage->width;
+        area->height = damage->height;
+        area->valid = true;
+    }
+}
+
+static void clip_rectangle(struct Rectangle *rectangle, const struct Rectangle *clip_region)
+{
+    rectangle->x = int_max(rectangle->x, clip_region->x);
+    rectangle->y = int_max(rectangle->y, clip_region->y);
+    rectangle->width = int_min(rectangle->x + rectangle->width, clip_region->x + clip_region->width) - rectangle->x;
+    rectangle->height = int_min(rectangle->y + rectangle->height, clip_region->y + clip_region->height) - rectangle->y;
+}
+
+static void dumb_diff(BaseDisplayItem *orig, int orig_len, BaseDisplayItem *new, int new_len, struct Rectangle *damaged)
+{
+    if (orig_len == 0) {
+        for (int i = 0; i < new_len; i++) {
+            struct Rectangle irect = {
+                .x = new[i].x,
+                .y = new[i].y,
+                .width = new[i].width,
+                .height = new[i].height,
+                .valid = true
+            };
+            update_damaged_area(damaged, &irect);
+        }
+        return;
+    }
+
+    int j = 0;
+
+    for (int i = 0; i < new_len; i++) {
+        if (cmp_display_item(&new[i], &orig[j])) {
+            j++;
+        } else {
+            bool found = false;
+            for (int k = j + 1; k < orig_len; k++) {
+                if (cmp_display_item(&new[i], &orig[k])) {
+                    for (int l = k - j; l < k; l++) {
+                        struct Rectangle irect = {
+                            .x = orig[l].x,
+                            .y = orig[l].y,
+                            .width = orig[l].width,
+                            .height = orig[l].height,
+                            .valid = true
+                        };
+                        update_damaged_area(damaged, &irect);
+                    }
+
+                    j = k + 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                struct Rectangle irect = {
+                    .x = new[i].x,
+                    .y = new[i].y,
+                    .width = new[i].width,
+                    .height = new[i].height,
+                    .valid = true
+                };
+                update_damaged_area(damaged, &irect);
+            }
+        }
+    }
+}
 
 static inline Uint32 uint32_color_to_surface(struct Screen *screen, uint32_t color)
 {
@@ -476,18 +602,37 @@ static void do_update(Context *ctx, term display_list)
         t = term_get_list_tail(t);
     }
 
-    int screen_width = screen->w;
-    int screen_height = screen->h;
+    struct Rectangle damaged;
+    damaged.valid = false;
+    dumb_diff(prev_items, prev_items_len, items, len, &damaged);
+    if (prev_items) {
+        destroy_items(prev_items, prev_items_len);
+        free(prev_message);
+    }
+    prev_items = items;
+    prev_items_len = len;
 
-    for (int ypos = 0; ypos < screen_height; ypos++) {
-        int xpos = 0;
-        while (xpos < screen_width) {
+    if (!damaged.valid) {
+        // skip update
+        return;
+    }
+
+    struct Rectangle screen_rect = {
+        .x = 0,
+        .y = 0,
+        .width = screen->w,
+        .height = screen->h,
+        .valid = true
+    };
+    clip_rectangle(&damaged, &screen_rect);
+
+    for (int ypos = damaged.y; ypos < damaged.y + damaged.height; ypos++) {
+        int xpos = damaged.x;
+        while (xpos < damaged.x + damaged.width) {
             int drawn_pixels = draw_x(xpos, ypos, items, len);
             xpos += drawn_pixels;
         }
     }
-
-    destroy_items(items, len);
 }
 
 static void process_message(Context *ctx)
@@ -531,6 +676,7 @@ static void process_message(Context *ctx)
                                       "update")) {
         term display_list = term_get_tuple_element(req, 1);
         do_update(ctx, display_list);
+        prev_message = message;
 
         // Copy and scale up
         int scale = screen->scale;
@@ -577,8 +723,7 @@ static void process_message(Context *ctx)
 
     mailbox_send(target, return_tuple);
 
-    free(message);
-    return;
+    goto free_msg_and_exit;
 
 invalid_message:
     fprintf(stderr, "Got invalid message: ");
@@ -586,7 +731,10 @@ invalid_message:
     fprintf(stderr, "\n");
     fprintf(stderr, "Expected gen_server call.\n");
 
-    free(message);
+free_msg_and_exit:
+    if (prev_message != message) {
+        free(message);
+    }
     return;
 }
 
