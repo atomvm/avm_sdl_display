@@ -509,7 +509,7 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
         if (font == context_make_atom(ctx, "\xB" "default16px")) {
             item->primitive = Text;
             item->height = 16;
-            item->width = strlen(item->data.text_data.text) * 8;
+            item->width = strlen(text) * 8;
             item->brcolor = brcolor;
             item->data.text_data.fgcolor = fgcolor;
             item->data.text_data.text = text;
