@@ -607,7 +607,7 @@ static void do_update(Context *ctx, term display_list)
     dumb_diff(prev_items, prev_items_len, items, len, &damaged);
     if (prev_items) {
         destroy_items(prev_items, prev_items_len);
-        free(prev_message);
+        mailbox_destroy_message(prev_message);
     }
     prev_items = items;
     prev_items_len = len;
@@ -733,7 +733,7 @@ invalid_message:
 
 free_msg_and_exit:
     if (prev_message != message) {
-        free(message);
+        mailbox_destroy_message(message);
     }
     return;
 }
