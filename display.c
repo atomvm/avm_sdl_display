@@ -3,12 +3,12 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include <AtomVM/context.h>
-#include <AtomVM/defaultatoms.h>
-#include <AtomVM/interop.h>
-#include <AtomVM/mailbox.h>
-#include <AtomVM/term.h>
-#include <AtomVM/utils.h>
+#include <context.h>
+#include <defaultatoms.h>
+#include <interop.h>
+#include <mailbox.h>
+#include <term.h>
+#include <utils.h>
 
 #include "ufontlib.h"
 
@@ -20,33 +20,11 @@
 #define CHAR_WIDTH 8
 #include "font.c"
 
-// from AtomVM generic_unix_sys.h
-
-typedef struct EventListener EventListener;
-
-typedef void (*event_handler_t)(EventListener *listener);
-
 struct DisplayOpts
 {
     avm_int_t width;
     avm_int_t height;
 };
-
-struct EventListener
-{
-    struct ListHead listeners_list_head;
-
-    event_handler_t handler;
-    void *data;
-    int fd;
-};
-
-struct GenericUnixPlatformData
-{
-    struct ListHead *listeners;
-};
-
-// end of generic_unix_sys.h private header
 
 struct KeyboardEvent
 {
@@ -101,7 +79,7 @@ typedef struct BaseDisplayItem BaseDisplayItem;
 
 static term keyboard_pid;
 static struct timespec ts0;
-static int keyboard_event_fds[2];
+Context *the_ctx;
 
 struct Screen
 {
@@ -119,12 +97,19 @@ static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 
 UFontManager *ufont_manager;
 
-static void consume_display_mailbox(Context *ctx);
+static NativeHandlerResult consume_display_mailbox(Context *ctx);
 static void *display_loop();
 
 Message *prev_message = NULL;
 BaseDisplayItem *prev_items = NULL;
 int prev_items_len = 0;
+
+static void destroy_message(Message *m, GlobalContext *global)
+{
+    BEGIN_WITH_STACK_HEAP(1, temp_heap);
+    mailbox_message_dispose(&m->base, &temp_heap);
+    END_WITH_STACK_HEAP(temp_heap, global);
+}
 
 static inline int int_min(int a, int b)
 {
@@ -446,14 +431,14 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
 {
     term cmd = term_get_tuple_element(req, 0);
 
-    if (cmd == context_make_atom(ctx, "\x5"
+    if (cmd == globalcontext_make_atom(ctx->global, "\x5"
                                       "image")) {
         item->primitive = Image;
         item->x = term_to_int(term_get_tuple_element(req, 1));
         item->y = term_to_int(term_get_tuple_element(req, 2));
 
         term bgcolor = term_get_tuple_element(req, 3);
-        if (bgcolor == context_make_atom(ctx, "\xB"
+        if (bgcolor == globalcontext_make_atom(ctx->global, "\xB"
                                               "transparent")) {
             item->brcolor = 0;
         } else {
@@ -463,7 +448,7 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
         term img = term_get_tuple_element(req, 4);
 
         term format = term_get_tuple_element(img, 0);
-        if (format != context_make_atom(ctx, "\x8"
+        if (format != globalcontext_make_atom(ctx->global, "\x8"
                                              "rgba8888")) {
             fprintf(stderr, "unsupported image format: ");
             term_display(stderr, format, ctx);
@@ -474,7 +459,7 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
         item->height = term_to_int(term_get_tuple_element(img, 2));
         item->data.image_data.pix = term_binary_data(term_get_tuple_element(img, 3));
 
-    } else if (cmd == context_make_atom(ctx, "\x4"
+    } else if (cmd == globalcontext_make_atom(ctx->global, "\x4"
                                              "rect")) {
         item->primitive = Rect;
         item->x = term_to_int(term_get_tuple_element(req, 1));
@@ -483,14 +468,14 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
         item->height = term_to_int(term_get_tuple_element(req, 4));
         item->brcolor = term_to_int(term_get_tuple_element(req, 5)) << 8 | 0xFF;
 
-    } else if (cmd == context_make_atom(ctx, "\x4"
+    } else if (cmd == globalcontext_make_atom(ctx->global, "\x4"
                                              "text")) {
         item->x = term_to_int(term_get_tuple_element(req, 1));
         item->y = term_to_int(term_get_tuple_element(req, 2));
         Uint32 fgcolor = term_to_int(term_get_tuple_element(req, 4)) << 8 | 0xFF;
         Uint32 brcolor;
         term bgcolor = term_get_tuple_element(req, 5);
-        if (bgcolor == context_make_atom(ctx, "\xB"
+        if (bgcolor == globalcontext_make_atom(ctx->global, "\xB"
                                               "transparent")) {
             brcolor = 0;
         } else {
@@ -506,7 +491,7 @@ static void init_item(BaseDisplayItem *item, term req, Context *ctx)
 
         term font = term_get_tuple_element(req, 3);
 
-        if (font == context_make_atom(ctx, "\xB" "default16px")) {
+        if (font == globalcontext_make_atom(ctx->global, "\xB" "default16px")) {
             item->primitive = Text;
             item->height = 16;
             item->width = strlen(text) * 8;
@@ -607,7 +592,7 @@ static void do_update(Context *ctx, term display_list)
     dumb_diff(prev_items, prev_items_len, items, len, &damaged);
     if (prev_items) {
         destroy_items(prev_items, prev_items_len);
-        mailbox_destroy_message(prev_message);
+        destroy_message(prev_message, ctx->global);
     }
     prev_items = items;
     prev_items_len = len;
@@ -637,12 +622,14 @@ static void do_update(Context *ctx, term display_list)
 
 static void process_message(Context *ctx)
 {
-    Message *message = mailbox_dequeue(ctx);
+    MailboxMessage *mbox_msg = mailbox_take_message(&ctx->mailbox);
+    Message *message = CONTAINER_OF(mbox_msg, Message, base);
+
     term msg = message->message;
 
     if (!term_is_tuple(msg) ||
             term_get_tuple_arity(msg) != 3 ||
-            term_get_tuple_element(msg, 0) != context_make_atom(ctx, "\x5" "$call")) {
+            term_get_tuple_element(msg, 0) != globalcontext_make_atom(ctx->global, "\x5" "$call")) {
         goto invalid_message;
     }
 
@@ -664,7 +651,6 @@ static void process_message(Context *ctx)
     term cmd = term_get_tuple_element(req, 0);
 
     int local_process_id = term_to_local_process_id(pid);
-    Context *target = globalcontext_get_process(ctx->global, local_process_id);
 
     if (SDL_MUSTLOCK(surface)) {
         if (SDL_LockSurface(surface) < 0) {
@@ -672,7 +658,7 @@ static void process_message(Context *ctx)
         }
     }
 
-    if (cmd == context_make_atom(ctx, "\x6"
+    if (cmd == globalcontext_make_atom(ctx->global, "\x6"
                                       "update")) {
         term display_list = term_get_tuple_element(req, 1);
         do_update(ctx, display_list);
@@ -688,11 +674,11 @@ static void process_message(Context *ctx)
             }
         }
 
-    } else if (cmd == context_make_atom(ctx, "\xF"
+    } else if (cmd == globalcontext_make_atom(ctx->global, "\xF"
                                              "subscribe_input")) {
         keyboard_pid = pid;
 
-    } else if (cmd == context_make_atom(ctx, "\xD" "register_font")) {
+    } else if (cmd == globalcontext_make_atom(ctx->global, "\xD" "register_font")) {
         term font_bin = term_get_tuple_element(req, 2);
         EpdFont *loaded_font = ufont_parse(term_binary_data(font_bin), term_binary_size(font_bin));
 
@@ -716,12 +702,12 @@ static void process_message(Context *ctx)
     if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
         abort();
     }
-    term return_tuple = term_alloc_tuple(3, ctx);
-    term_put_tuple_element(return_tuple, 0, context_make_atom(ctx, "\x6" "$reply"));
+    term return_tuple = term_alloc_tuple(3, &ctx->heap);
+    term_put_tuple_element(return_tuple, 0, globalcontext_make_atom(ctx->global, "\x6" "$reply"));
     term_put_tuple_element(return_tuple, 1, from);
     term_put_tuple_element(return_tuple, 2, OK_ATOM);
 
-    mailbox_send(target, return_tuple);
+    globalcontext_send_message(ctx->global, local_process_id, return_tuple);
 
     goto free_msg_and_exit;
 
@@ -733,33 +719,27 @@ invalid_message:
 
 free_msg_and_exit:
     if (prev_message != message) {
-        mailbox_destroy_message(message);
+        destroy_message(message, ctx->global);
     }
     return;
 }
 
-static void consume_display_mailbox(Context *ctx)
+static NativeHandlerResult consume_display_mailbox(Context *ctx)
 {
-    while (!list_is_empty(&ctx->mailbox)) {
-        process_message(ctx);
-    }
+    process_message(ctx);
+
+    return NativeContinue;
 }
 
 static void send_message(term pid, term message, GlobalContext *global)
 {
     int local_process_id = term_to_local_process_id(pid);
-    Context *target = globalcontext_get_process(global, local_process_id);
-    if (target) {
-        mailbox_send(target, message);
-    }
+    globalcontext_send_message(global, local_process_id, message);
 }
 
-static void keyboard_callback(EventListener *listener)
+void send_keyboard_event(struct KeyboardEvent *keyb, Context *ctx)
 {
-    Context *ctx = (Context *) listener->data;
-
-    struct KeyboardEvent keyb;
-    read(keyboard_event_fds[0], &keyb, sizeof(keyb));
+    GlobalContext *glb = ctx->global;
 
     if (keyboard_pid) {
         struct timespec ts;
@@ -767,29 +747,29 @@ static void keyboard_callback(EventListener *listener)
 
         avm_int_t millis = (ts.tv_sec - ts0.tv_sec) * 1000 + (ts.tv_nsec - ts0.tv_nsec) / 1000000;
 
-        if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3) + TUPLE_SIZE(4)) != MEMORY_GC_OK)) {
-            abort();
-        }
+        BEGIN_WITH_STACK_HEAP(TUPLE_SIZE(3) + TUPLE_SIZE(4), heap);
 
-        term up_down = keyb.key_down ? context_make_atom(ctx, "\x4"
+        term up_down = keyb->key_down ? globalcontext_make_atom(glb, "\x4"
                                                               "down")
-                                     : context_make_atom(ctx, "\x2"
+                                     : globalcontext_make_atom(glb, "\x2"
                                                               "up");
 
-        term event_data_tuple = term_alloc_tuple(3, ctx);
-        term_put_tuple_element(event_data_tuple, 0, context_make_atom(ctx, "\x8"
+        term event_data_tuple = term_alloc_tuple(3, &heap);
+        term_put_tuple_element(event_data_tuple, 0, globalcontext_make_atom(glb, "\x8"
                                                                            "keyboard"));
         term_put_tuple_element(event_data_tuple, 1, up_down);
-        term_put_tuple_element(event_data_tuple, 2, term_from_int(keyb.key));
+        term_put_tuple_element(event_data_tuple, 2, term_from_int(keyb->key));
 
-        term event_tuple = term_alloc_tuple(4, ctx);
-        term_put_tuple_element(event_tuple, 0, context_make_atom(ctx, "\xB"
+        term event_tuple = term_alloc_tuple(4, &heap);
+        term_put_tuple_element(event_tuple, 0, globalcontext_make_atom(glb, "\xB"
                                                                       "input_event"));
         term_put_tuple_element(event_tuple, 1, term_from_local_process_id(ctx->process_id));
         term_put_tuple_element(event_tuple, 2, term_from_int(millis));
         term_put_tuple_element(event_tuple, 3, event_data_tuple);
 
-        send_message(keyboard_pid, event_tuple, ctx->global);
+        send_message(keyboard_pid, event_tuple, glb);
+
+        END_WITH_STACK_HEAP(heap, glb);
     }
 }
 
@@ -798,9 +778,9 @@ Context *display_create_port(GlobalContext *global, term opts)
     Context *ctx = context_new(global);
     ctx->native_handler = consume_display_mailbox;
 
-    term width_atom = context_make_atom(ctx, "\x5"
+    term width_atom = globalcontext_make_atom(ctx->global, "\x5"
                                              "width");
-    term height_atom = context_make_atom(ctx, "\x6"
+    term height_atom = globalcontext_make_atom(ctx->global, "\x6"
                                               "height");
 
     term width_term = interop_proplist_get_value_default(opts, width_atom, term_from_int(SCREEN_WIDTH));
@@ -817,8 +797,6 @@ Context *display_create_port(GlobalContext *global, term opts)
     disp_opts->height = height;
     ctx->platform_data = disp_opts;
 
-    pipe(keyboard_event_fds);
-
     UNUSED(opts);
 
     pthread_t thread_id;
@@ -829,19 +807,7 @@ Context *display_create_port(GlobalContext *global, term opts)
     pthread_mutex_lock(&ready_mutex);
     pthread_cond_wait(&ready, &ready_mutex);
     pthread_mutex_unlock(&ready_mutex);
-
-    GlobalContext *glb = ctx->global;
-    struct GenericUnixPlatformData *platform = glb->platform_data;
-
-    EventListener *listener = malloc(sizeof(EventListener));
-    if (IS_NULL_PTR(listener)) {
-        fprintf(stderr, "Failed to allocate memory: %s:%i.\n", __FILE__, __LINE__);
-        abort();
-    }
-    listener->fd = keyboard_event_fds[0];
-    listener->data = ctx;
-    listener->handler = keyboard_callback;
-    linkedlist_append(&platform->listeners, &listener->listeners_list_head);
+    the_ctx = ctx;
 
     clock_gettime(CLOCK_MONOTONIC, &ts0);
 
@@ -929,7 +895,7 @@ void *display_loop(void *args)
                 memset(&keyb_event, 0, sizeof(struct KeyboardEvent));
                 keyb_event.key = event.key.keysym.unicode;
                 keyb_event.key_down = true;
-                write(keyboard_event_fds[1], &keyb_event, sizeof(keyb_event));
+                send_keyboard_event(&keyb_event, the_ctx);
                 break;
             }
 
@@ -938,7 +904,7 @@ void *display_loop(void *args)
                 memset(&keyb_event, 0, sizeof(struct KeyboardEvent));
                 keyb_event.key = event.key.keysym.sym;
                 keyb_event.key_down = false;
-                write(keyboard_event_fds[1], &keyb_event, sizeof(keyb_event));
+                send_keyboard_event(&keyb_event, the_ctx);
                 break;
             }
 
