@@ -1,5 +1,5 @@
 cmake_minimum_required (VERSION 3.13)
-project (simulator)
+project (avm_sdl_display)
 
 include_directories(${LIBATOMVM_INCLUDE_PATH})
 
