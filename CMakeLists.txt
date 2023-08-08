@@ -15,7 +15,7 @@ else(ZLIB_FOUND)
 endif(ZLIB_FOUND)
 
 if(CMAKE_COMPILER_IS_GNUCC)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -pedantic -Wextra -ggdb")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -ggdb")
 endif()
 
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
