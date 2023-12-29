@@ -28,7 +28,9 @@ start() ->
     disp(Display, 16#00FF0000),
     disp(Display, 16#0000FF00),
 
-    Display ! {'$call', {self(), make_ref()}, {subscribe_input}},
+    % TODO: let's switch back to the following as soon as tuple format is changed in port.c
+    % Display ! {'$call', {self(), make_ref()}, {subscribe_input}},
+    Display ! {self(), make_ref(), {subscribe_input}},
 
     loop().
 
@@ -37,7 +39,9 @@ disp(Display, Num) ->
     Scene = [
         {text, 10, 20, default16px, Num, 16#FFFFFF, <<"Test ", Bin/binary>>}
     ],
-    Display ! {'$call', {self(), make_ref()}, {update, Scene}}.
+    % TODO: let's switch back to the following as soon as tuple format is changed in port.c
+    % Display ! {'$call', {self(), make_ref()}, {update, Scene}}.
+    Display ! {self(), make_ref(), {update, Scene}}.
 
 loop() ->
     receive

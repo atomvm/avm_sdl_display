@@ -7,6 +7,7 @@
 #include <defaultatoms.h>
 #include <interop.h>
 #include <mailbox.h>
+#include <port.h>
 #include <term.h>
 #include <utils.h>
 
@@ -625,32 +626,17 @@ static void process_message(Context *ctx)
     MailboxMessage *mbox_msg = mailbox_take_message(&ctx->mailbox);
     Message *message = CONTAINER_OF(mbox_msg, Message, base);
 
-    term msg = message->message;
-
-    if (!term_is_tuple(msg) ||
-            term_get_tuple_arity(msg) != 3 ||
-            term_get_tuple_element(msg, 0) != globalcontext_make_atom(ctx->global, "\x5" "$call")) {
+    GenMessage gen_message;
+    if (UNLIKELY(port_parse_gen_message(message->message, &gen_message) != GenCallMessage)) {
         goto invalid_message;
     }
 
-    term from = term_get_tuple_element(msg, 1);
-    if (!term_is_tuple(from) || term_get_tuple_arity(from) != 2) {
-        goto invalid_message;
-    }
-
-    term req = term_get_tuple_element(msg, 2);
-    if (!term_is_tuple(req) || term_get_tuple_arity(req) < 1) {
-        goto invalid_message;
-    }
-
-    term pid = term_get_tuple_element(from, 0);
-    if (!term_is_pid(pid)) {
+    term req = gen_message.req;
+    if (UNLIKELY(!term_is_tuple(req) || term_get_tuple_arity(req) < 1)) {
         goto invalid_message;
     }
 
     term cmd = term_get_tuple_element(req, 0);
-
-    int local_process_id = term_to_local_process_id(pid);
 
     if (SDL_MUSTLOCK(surface)) {
         if (SDL_LockSurface(surface) < 0) {
@@ -676,7 +662,7 @@ static void process_message(Context *ctx)
 
     } else if (cmd == globalcontext_make_atom(ctx->global, "\xF"
                                              "subscribe_input")) {
-        keyboard_pid = pid;
+        keyboard_pid = gen_message.pid;
 
     } else if (cmd == globalcontext_make_atom(ctx->global, "\xD" "register_font")) {
         term font_bin = term_get_tuple_element(req, 2);
@@ -702,18 +688,18 @@ static void process_message(Context *ctx)
     if (UNLIKELY(memory_ensure_free(ctx, TUPLE_SIZE(3)) != MEMORY_GC_OK)) {
         abort();
     }
-    term return_tuple = term_alloc_tuple(3, &ctx->heap);
-    term_put_tuple_element(return_tuple, 0, globalcontext_make_atom(ctx->global, "\x6" "$reply"));
-    term_put_tuple_element(return_tuple, 1, from);
-    term_put_tuple_element(return_tuple, 2, OK_ATOM);
+    term return_tuple = term_alloc_tuple(2, &ctx->heap);
+    term_put_tuple_element(return_tuple, 0, gen_message.ref);
+    term_put_tuple_element(return_tuple, 1, OK_ATOM);
 
+    int local_process_id = term_to_local_process_id(gen_message.pid);
     globalcontext_send_message(ctx->global, local_process_id, return_tuple);
 
     goto free_msg_and_exit;
 
 invalid_message:
     fprintf(stderr, "Got invalid message: ");
-    term_display(stderr, msg, ctx);
+    term_display(stderr, message->message, ctx);
     fprintf(stderr, "\n");
     fprintf(stderr, "Expected gen_server call.\n");
 
