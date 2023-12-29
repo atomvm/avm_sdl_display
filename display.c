@@ -33,6 +33,14 @@ struct KeyboardEvent
     bool key_down;
 };
 
+struct MouseEvent
+{
+    int type;
+    int button;
+    int x;
+    int y;
+};
+
 struct Rectangle
 {
     int x;
@@ -759,6 +767,78 @@ void send_keyboard_event(struct KeyboardEvent *keyb, Context *ctx)
     }
 }
 
+void send_mouse_event(struct MouseEvent *mouse, Context *ctx)
+{
+    GlobalContext *glb = ctx->global;
+
+    if (keyboard_pid) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+
+        avm_int_t millis = (ts.tv_sec - ts0.tv_sec) * 1000 + (ts.tv_nsec - ts0.tv_nsec) / 1000000;
+
+        term released = globalcontext_make_atom(glb, ATOM_STR("\x8", "released"));
+        term pressed = globalcontext_make_atom(glb, ATOM_STR("\x7", "pressed"));
+
+        bool has_state_tuple = false;
+        term event_type;
+        switch (mouse->type) {
+            case SDL_MOUSEMOTION:
+                has_state_tuple = true;
+                event_type = globalcontext_make_atom(glb, ATOM_STR("\x4", "move"));
+                break;
+            case SDL_MOUSEBUTTONDOWN:
+                event_type = pressed;
+                break;
+            case SDL_MOUSEBUTTONUP:
+                event_type = released;
+                break;
+            default:
+                fprintf(stderr, "Unexpected mouse event type.\n");
+                return;
+        };
+
+        BEGIN_WITH_STACK_HEAP(TUPLE_SIZE(3) + TUPLE_SIZE(5) + TUPLE_SIZE(4), heap);
+
+        term state;
+        if (has_state_tuple) {
+            state = term_alloc_tuple(3, &heap);
+            term_put_tuple_element(state, 0, (mouse->button & SDL_BUTTON(1)) ? pressed : released);
+            term_put_tuple_element(state, 1, (mouse->button & SDL_BUTTON(2)) ? pressed : released);
+            term_put_tuple_element(state, 2, (mouse->button & SDL_BUTTON(3)) ? pressed : released);
+        } else {
+            switch (mouse->button) {
+                case SDL_BUTTON_LEFT:
+                    state = globalcontext_make_atom(glb, ATOM_STR("\x4", "left"));
+                    break;
+                case SDL_BUTTON_MIDDLE:
+                    state = globalcontext_make_atom(glb, ATOM_STR("\x6", "middle"));
+                    break;
+                case SDL_BUTTON_RIGHT:
+                    state = globalcontext_make_atom(glb, ATOM_STR("\x5", "right"));
+                    break;
+            }
+        }
+
+        term event_data_tuple = term_alloc_tuple(5, &heap);
+        term_put_tuple_element(event_data_tuple, 0, globalcontext_make_atom(glb, ATOM_STR("\x5", "mouse")));
+        term_put_tuple_element(event_data_tuple, 1, event_type);
+        term_put_tuple_element(event_data_tuple, 2, state);
+        term_put_tuple_element(event_data_tuple, 3, term_from_int(mouse->x));
+        term_put_tuple_element(event_data_tuple, 4, term_from_int(mouse->y));
+
+        term event_tuple = term_alloc_tuple(4, &heap);
+        term_put_tuple_element(event_tuple, 0, globalcontext_make_atom(glb, ATOM_STR("\xB", "input_event")));
+        term_put_tuple_element(event_tuple, 1, term_from_local_process_id(ctx->process_id));
+        term_put_tuple_element(event_tuple, 2, term_from_int(millis));
+        term_put_tuple_element(event_tuple, 3, event_data_tuple);
+
+        send_message(keyboard_pid, event_tuple, glb);
+
+        END_WITH_STACK_HEAP(heap, glb);
+    }
+}
+
 Context *display_create_port(GlobalContext *global, term opts)
 {
     Context *ctx = context_new(global);
@@ -891,6 +971,39 @@ void *display_loop(void *args)
                 keyb_event.key = event.key.keysym.sym;
                 keyb_event.key_down = false;
                 send_keyboard_event(&keyb_event, the_ctx);
+                break;
+            }
+
+            case SDL_MOUSEMOTION: {
+                struct MouseEvent mouse_event;
+                memset(&mouse_event, 0, sizeof(struct MouseEvent));
+                mouse_event.type = event.motion.type;
+                mouse_event.button = event.motion.state;
+                mouse_event.x = event.motion.x;
+                mouse_event.y = event.motion.y;
+                send_mouse_event(&mouse_event, the_ctx);
+                break;
+            }
+
+            case SDL_MOUSEBUTTONDOWN: {
+                struct MouseEvent mouse_event;
+                memset(&mouse_event, 0, sizeof(struct MouseEvent));
+                mouse_event.type = event.button.type;
+                mouse_event.button = event.button.button;
+                mouse_event.x = event.button.x;
+                mouse_event.y = event.button.y;
+                send_mouse_event(&mouse_event, the_ctx);
+                break;
+            }
+
+            case SDL_MOUSEBUTTONUP: {
+                struct MouseEvent mouse_event;
+                memset(&mouse_event, 0, sizeof(struct MouseEvent));
+                mouse_event.type = event.button.type;
+                mouse_event.button = event.button.button;
+                mouse_event.x = event.button.x;
+                mouse_event.y = event.button.y;
+                send_mouse_event(&mouse_event, the_ctx);
                 break;
             }
 
