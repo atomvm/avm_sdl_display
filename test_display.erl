@@ -30,7 +30,7 @@ start() ->
 
     % TODO: let's switch back to the following as soon as tuple format is changed in port.c
     % Display ! {'$call', {self(), make_ref()}, {subscribe_input}},
-    Display ! {self(), make_ref(), {subscribe_input}},
+    Display ! {self(), make_ref(), {subscribe_input, all}},
 
     loop().
 
